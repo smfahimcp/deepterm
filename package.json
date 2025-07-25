@@ -1,15 +1,22 @@
 {
-  "name": "nodejs",
+  "name": "deepterm",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Bring DeepSeek to your terminal.",
+  "main": "deepterm-api.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node deepterm-api.js",
+    "test": "nodemon deepterm-api.js"
   },
   "keywords": [],
-  "author": "",
+  "author": "S M Fahim",
   "license": "ISC",
+  "type": "module",
   "dependencies": {
-    "@types/node": "^22.13.11"
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "form-data": "^4.0.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
   }
 }
