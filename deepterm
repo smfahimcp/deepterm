@@ -27,25 +27,28 @@ let asciiLogo = `
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠁⠒⠄⠬⢉⣡⣠⣿⣿⣿⣇⡌⠲⠠⠋⠈⠀⠀⠀
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣾⣿⡿⠃⠀⠀⠀⠀⠀⠀⠀⠀⠀
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠉⠁⠀DeepTerm
-`
+`;
 
 for (let i = 0; i < args.length; i++) {
-  switch (args[i]) {
-    case '-p':
-    case '--prompt':
+  const a = args[i];
+  if (a === '-p' || a === '--prompt') {
+    if (i + 1 < args.length) {
       promptArg = args[++i];
-      break;
-    case '-i':
-    case '--interactive':
-      interactive = true;
-      break;
-    case '-o':
-    case '--output':
+    } else {
+      console.error('❌ Missing value for', a);
+      process.exit(1);
+    }
+  } else if (a === '-i' || a === '--interactive') {
+    interactive = true;
+  } else if (a === '-o' || a === '--output') {
+    if (i + 1 < args.length) {
       outputFile = args[++i];
-      break;
-    case '-h':
-    case '--help':
-      console.log(`Usage: deepterm [options]
+    } else {
+      console.error('❌ Missing value for', a);
+      process.exit(1);
+    }
+  } else if (a === '-h' || a === '--help') {
+    console.log(`Usage: deepterm [options]
 
 Options:
   -p, --prompt "<text>"     Send one-shot prompt via CLI
@@ -53,7 +56,7 @@ Options:
   -o, --output <file>       Save the response to a file
   -h, --help                Show this help message
 `);
-      process.exit(0);
+    process.exit(0);
   }
 }
 
@@ -74,11 +77,13 @@ export async function interactiveCLI(CHAT_SESSION_ID, LAST_CHAT_ID) {
 
   aiBannerPrompt();
 
-  process.stdin.setRawMode(true);
+  if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
+    process.stdin.setRawMode(true);
+  }
   process.stdin.resume();
   readline.emitKeypressEvents(process.stdin);
 
-  process.stdin.on('keypress', async (str, key) => {
+  const onKeypress = async (str, key) => {
     try {
       if (key.name === 'return' || key.sequence === '\r') {
         buffer.push(currentLine);
@@ -99,147 +104,199 @@ export async function interactiveCLI(CHAT_SESSION_ID, LAST_CHAT_ID) {
 
         if (prompt) {
           console.log('\n\n🤖 Response:\n');
-          for await (let token of core.completion(TOKEN, prompt, CHAT_SESSION_ID, LAST_CHAT_ID)) {
-            process.stdout.write(token);
+          try {
+            for await (let token of core.completion(TOKEN, prompt, CHAT_SESSION_ID, LAST_CHAT_ID)) {
+              process.stdout.write(token);
+            }
+          } catch (e) {
+            console.error('\n❌ Error while streaming response:', e.message || e);
           }
           console.log('\n\n' + '━'.repeat(60) + '\n');
         } else {
-          console.log("\n❌ Empty prompt.\n");
+          console.log('\n❌ Empty prompt.\n');
         }
       } else if (key.ctrl && key.name === 'c') {
         console.log('\n👋 Exiting.\n');
-        process.exit();
+        cleanupAndExit();
       } else if (typeof str === 'string' && str !== '\u0000') {
         currentLine += str;
         process.stdout.write(str);
       }
     } catch (e) {
-      console.error("❌ Error:", e.message);
+      console.error('❌ Error:', e.message || e);
     }
+  };
+
+  process.stdin.on('keypress', onKeypress);
+
+  function cleanupAndExit(code = 0) {
+    try {
+      process.stdin.removeListener('keypress', onKeypress);
+      if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
+        process.stdin.setRawMode(false);
+      }
+    } catch (e) {
+    }
+    process.exit(code);
+  }
+
+  process.on('SIGINT', () => cleanupAndExit(0));
+  process.on('exit', () => {
+    try {
+      if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
+        process.stdin.setRawMode(false);
+      }
+    } catch (e) {}
   });
 }
 
 async function sendPrompt(promptText) {
-  const session = await core.createChatSession(TOKEN);
-  const chatId = session?.data?.biz_data?.id;
-  const parentId = null;
+  try {
+    const session = await core.createChatSession(TOKEN);
+    const chatId = session?.data?.biz_data?.id;
+    const parentId = null;
 
-  if (!chatId) {
-    console.error('❌ Failed to create chat session.');
+    if (!chatId) {
+      console.error('❌ Failed to create chat session.');
+      process.exit(1);
+    }
+
+    let fullResponse = '';
+    for await (const token of core.completion(TOKEN, promptText, chatId, parentId)) {
+      process.stdout.write(token);
+      fullResponse += token;
+    }
+
+    if (outputFile) {
+      try {
+        fs.writeFileSync(outputFile, fullResponse);
+      } catch (e) {
+        console.error('❌ Failed to write output file:', e.message || e);
+      }
+    }
+  } catch (e) {
+    console.error('❌ sendPrompt failed:', e.message || e);
     process.exit(1);
-  }
-
-  let fullResponse = '';
-  for await (const token of core.completion(TOKEN, promptText, chatId, parentId)) {
-    process.stdout.write(token);
-    fullResponse += token;
-  }
-
-  if (outputFile) {
-    fs.writeFileSync(outputFile, fullResponse);
   }
 }
 
 async function runInteractiveMode() {
-  console.clear();
-  console.log(`${asciiLogo}\n`)
-  const profile = await core.getCurrentProfile(TOKEN);
-  if (typeof profile !== "object") {
-    console.log('❌ Failed to fetch user profile.');
-    return;
-  }
-
-  const email = profile.data.biz_data.email;
-  console.log(`Logged in as: ${email}\n`);
-
-  if (profile.data.biz_data.chat.is_muted === 1) {
-    const ts = profile.data.biz_data.chat.mute_until;
-    const date = new Date(ts * 1000);
-    console.log('⚠️ You are currently muted!');
-    console.log(`🔇 Mute expires at: ${date.toString()}`);
-    return;
-  }
-
-  const pages = await core.fetchAllChatSessions(TOKEN);
-  if (typeof pages !== "object") {
-    console.log('❌ Failed to fetch chat sessions.');
-    return;
-  }
-
-  const chats = pages.data.biz_data.chat_sessions;
-  if (!Array.isArray(chats) || chats.length === 0) {
-    console.log('❌ No chat sessions found.');
-    return;
-  }
-
-  console.log("💬 Available chat sessions:\n");
-  chats.forEach((chat, i) => {
-    const title = chat.title || "(untitled)";
-    console.log(`[${i + 1}] ${title}`);
-  });
-  console.log('[+] Start a new chat session');
-
-  const rl = readlinePrompt.createInterface({ input, output });
-  let ans;
-  try{
-    ans = await rl.question("\n➡️ Select a session or type + to create new:  ");
-  }catch{
-    return;
-  }
-  rl.close();
-
-  if (ans === '+') {
-    const newChat = await core.createChatSession(TOKEN);
-    if (typeof newChat !== "object") {
-      console.log('❌ Failed to create new session.');
-      return;
-    }
+  try {
     console.clear();
-    console.log(`${asciiLogo}\n\n✅ New session started.`);
-    await interactiveCLI(newChat.data.biz_data.id, null);
-  } else {
-    const idx = parseInt(ans.trim()) - 1;
-    if (isNaN(idx) || idx < 0 || idx >= chats.length) {
-      console.log("❌ Invalid selection.");
+    console.log(`${asciiLogo}\n`);
+    const profile = await core.getCurrentProfile(TOKEN);
+    if (!profile || typeof profile !== 'object') {
+      console.log('❌ Failed to fetch user profile.');
       return;
     }
-    const selectedChat = chats[idx];
-    console.clear();
-    console.log(`${asciiLogo}\n\n✅ Using session: ${selectedChat.title}`);
-    const chat_session = await core.fetchHistoryMessages(TOKEN, selectedChat.id);
-    if (typeof chat_session !== "object") {
-      console.log('❌ Failed to load messages.');
+
+    const email = profile.data?.biz_data?.email;
+    console.log(`Logged in as: ${email}\n`);
+
+    if (profile.data?.biz_data?.chat?.is_muted === 1) {
+      const ts = profile.data.biz_data.chat.mute_until;
+      const date = new Date(ts * 1000);
+      console.log('⚠️ You are currently muted!');
+      console.log(`🔇 Mute expires at: ${date.toString()}`);
       return;
     }
-    const list_msg = chat_session.data.biz_data.chat_messages;
-    let last_msg_id = 0;
-    if (list_msg.length !== 0) {
-      const last_msg = list_msg[list_msg.length - 1];
-      last_msg_id = last_msg.message_id;
+
+    const pages = await core.fetchAllChatSessions(TOKEN);
+    if (!pages || typeof pages !== 'object') {
+      console.log('❌ Failed to fetch chat sessions.');
+      return;
     }
-    console.log("📨 Resuming from the last message...");
-    await interactiveCLI(selectedChat.id, last_msg_id);
+
+    const chats = pages.data?.biz_data?.chat_sessions || [];
+    if (!Array.isArray(chats) || chats.length === 0) {
+      console.log('❌ No chat sessions found.');
+      return;
+    }
+
+    console.log('💬 Available chat sessions:\n');
+    chats.forEach((chat, i) => {
+      const title = chat.title || '(untitled)';
+      console.log(`[${i + 1}] ${title}`);
+    });
+    console.log('[+] Start a new chat session');
+
+    const rl = readlinePrompt.createInterface({ input, output });
+    let ans;
+    try {
+      ans = await rl.question('\n➡️ Select a session or type + to create new:  ');
+    } catch (e) {
+      rl.close();
+      return;
+    }
+    rl.close();
+
+    if (ans === '+') {
+      const newChat = await core.createChatSession(TOKEN);
+      if (!newChat || typeof newChat !== 'object') {
+        console.log('❌ Failed to create new session.');
+        return;
+      }
+      console.clear();
+      console.log(`${asciiLogo}\n\n✅ New session started.`);
+      await interactiveCLI(newChat.data.biz_data.id, null);
+    } else {
+      const idx = parseInt((ans || '').trim(), 10) - 1;
+      if (isNaN(idx) || idx < 0 || idx >= chats.length) {
+        console.log('❌ Invalid selection.');
+        return;
+      }
+      const selectedChat = chats[idx];
+      console.clear();
+      console.log(`${asciiLogo}\n\n✅ Using session: ${selectedChat.title}`);
+
+      const chatId = selectedChat.id || selectedChat.chat_session_id || selectedChat._id || selectedChat.biz_data?.id;
+      if (!chatId) {
+        console.log('❌ Could not determine chat id for the selected session.');
+        return;
+      }
+
+      const chat_session = await core.fetchHistoryMessages(TOKEN, chatId);
+      if (!chat_session || typeof chat_session !== 'object') {
+        console.log('❌ Failed to load messages.');
+        return;
+      }
+      const list_msg = chat_session.data?.biz_data?.chat_messages || [];
+      let last_msg_id = 0;
+      if (list_msg.length !== 0) {
+        const last_msg = list_msg[list_msg.length - 1];
+        last_msg_id = last_msg.message_id || last_msg.id || 0;
+      }
+      console.log('📨 Resuming from the last message...');
+      await interactiveCLI(chatId, last_msg_id);
+    }
+  } catch (e) {
+    console.error('❌ runInteractiveMode failed:', e.message || e);
   }
 }
 
 (async () => {
-  if (interactive || (!promptArg && process.stdin.isTTY)) {
-    await runInteractiveMode();
-  } else if (promptArg) {
-    let finalPrompt = promptArg;
-    if (!process.stdin.isTTY) {
-      let inputText = '';
-      for await (const chunk of process.stdin) {
-        inputText += chunk;
+  try {
+    if (interactive || (!promptArg && process.stdin.isTTY)) {
+      await runInteractiveMode();
+    } else if (promptArg) {
+      let finalPrompt = promptArg;
+      if (!process.stdin.isTTY) {
+        let inputText = '';
+        for await (const chunk of process.stdin) {
+          inputText += chunk;
+        }
+        finalPrompt += '\n\n' + inputText.trim();
       }
-      finalPrompt += '\n\n' + inputText.trim();
+      await sendPrompt(finalPrompt);
+    } else {
+      let piped = '';
+      for await (const chunk of process.stdin) {
+        piped += chunk;
+      }
+      await sendPrompt(piped.trim());
     }
-    await sendPrompt(finalPrompt);
-  } else {
-    let piped = '';
-    for await (const chunk of process.stdin) {
-      piped += chunk;
-    }
-    await sendPrompt(piped.trim());
+  } catch (e) {
+    console.error('❌ Unexpected failure:', e.message || e);
+    process.exit(1);
   }
 })();
